@@ -7,6 +7,10 @@ Lab 11 — Part 2B: Output Guardrails
 import re
 import textwrap
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from google.genai import types
 from google.adk.agents import llm_agent
 from google.adk import runners
@@ -14,18 +18,6 @@ from google.adk.plugins import base_plugin
 
 from core.utils import chat_with_agent
 
-
-# ============================================================
-# TODO 6: Implement content_filter()
-#
-# Check if the response contains PII (personal info), API keys,
-# passwords, or inappropriate content.
-#
-# Return a dict with:
-# - "safe": True/False
-# - "issues": list of problems found
-# - "redacted": cleaned response (PII replaced with [REDACTED])
-# ============================================================
 
 def content_filter(response: str) -> dict:
     """Filter response for PII, secrets, and harmful content.
@@ -39,14 +31,31 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # PII / secret patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        # Vietnamese phone number, e.g. 0901234567, 84901234567, +84901234567
+        "vn_phone_number": r"\b(?:\+?84|0)\d{9,10}\b",
+
+        # Email address
+        "email": r"\b[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}\b",
+
+        # Vietnamese National ID / Citizen ID: 9 digits or 12 digits
+        "national_id": r"\b(?:\d{9}|\d{12})\b",
+
+        # API key-like secret, e.g. sk-xxxx
+        "api_key": r"\bsk-[a-zA-Z0-9_-]+\b",
+
+        # Password assignment, e.g.
+        # password: admin123
+        # password=admin123
+        # password is admin123
+        "password": r"\bpassword\s*(?:is|:|=)\s*\S+",
+
+        # Token-like secret, e.g.
+        # token: abc123
+        # access_token=abc123
+        # secret_token is abc123
+        "token": r"\b(?:access_token|secret_token|api_token|token)\s*(?:is|:|=)\s*\S+",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -61,17 +70,6 @@ def content_filter(response: str) -> dict:
         "redacted": redacted,
     }
 
-
-# ============================================================
-# TODO 7: Implement LLM-as-Judge
-#
-# Create a separate agent (judge) to check response safety.
-# The judge classifies responses as SAFE or UNSAFE.
-#
-# KEY: The judge's instruction must NOT contain {placeholders}
-# because ADK treats them as context variables.
-# Instead, pass the content to evaluate as the user message.
-# ============================================================
 
 SAFETY_JUDGE_INSTRUCTION = """You are a safety classifier for an AI banking assistant.
 Your job is to determine if a given AI response is safe to send to customers.
@@ -88,16 +86,12 @@ Check for:
 Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
+safety_judge_agent = llm_agent.LlmAgent(
+    model="gemini-2.0-flash",
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+)
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
 judge_runner = None
 
 
@@ -108,6 +102,9 @@ def _init_judge():
         judge_runner = runners.InMemoryRunner(
             agent=safety_judge_agent, app_name="safety_judge"
         )
+
+
+_init_judge()
 
 
 async def llm_safety_check(response_text: str) -> dict:
@@ -127,18 +124,6 @@ async def llm_safety_check(response_text: str) -> dict:
     is_safe = "SAFE" in verdict.upper() and "UNSAFE" not in verdict.upper()
     return {"safe": is_safe, "verdict": verdict.strip()}
 
-
-# ============================================================
-# TODO 8: Implement OutputGuardrailPlugin
-#
-# This plugin checks the agent's output BEFORE sending to the user.
-# Uses after_model_callback to intercept LLM responses.
-# Combines content_filter() and llm_safety_check().
-#
-# NOTE: after_model_callback uses keyword-only arguments.
-#   - llm_response has a .content attribute (types.Content)
-#   - Return the (possibly modified) llm_response, or None to keep original
-# ============================================================
 
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
     """Plugin that checks agent output before sending to user."""
@@ -172,16 +157,37 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Run deterministic content filter first
+        filter_result = content_filter(response_text)
 
-        return llm_response  # TODO: modify if needed
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            response_text = filter_result["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
+
+        # 2. Optionally run LLM-as-Judge safety check
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(response_text)
+
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+
+                safe_message = (
+                    "I can't provide that response because it may contain unsafe, "
+                    "sensitive, or unreliable information. Please ask a banking-related "
+                    "question that does not involve private data, secrets, or harmful instructions."
+                )
+
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=safe_message)],
+                )
+
+        # 3. Return possibly modified response
+        return llm_response
 
 
 # ============================================================
@@ -206,8 +212,6 @@ def test_content_filter():
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
     test_content_filter()
