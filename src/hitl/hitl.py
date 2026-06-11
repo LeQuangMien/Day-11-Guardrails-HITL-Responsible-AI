@@ -6,19 +6,6 @@ Lab 11 — Part 4: Human-in-the-Loop Design
 from dataclasses import dataclass
 
 
-# ============================================================
-# TODO 12: Implement ConfidenceRouter
-#
-# Route agent responses based on confidence scores:
-#   - HIGH (>= 0.9): Auto-send to user
-#   - MEDIUM (0.7 - 0.9): Queue for human review
-#   - LOW (< 0.7): Escalate to human immediately
-#
-# Special case: if the action is HIGH_RISK (e.g., money transfer,
-# account deletion), ALWAYS escalate regardless of confidence.
-#
-# Implement the route() method.
-# ============================================================
 
 HIGH_RISK_ACTIONS = [
     "transfer_money",
@@ -65,71 +52,106 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # TODO 12: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        # Normalize action_type to make matching more robust
+        normalized_action = action_type.lower().strip()
 
+        # 1. High-risk actions always require immediate human escalation
+        if normalized_action in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type}",
+                priority="high",
+                requires_human=True,
+            )
+
+        # 2. High confidence: auto-send
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence",
+                priority="low",
+                requires_human=False,
+            )
+
+        # 3. Medium confidence: queue for review
+        if confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs review",
+                priority="normal",
+                requires_human=True,
+            )
+
+        # 4. Low confidence: escalate immediately
         return RoutingDecision(
-            action="auto_send",
+            action="escalate",
             confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+            reason="Low confidence — escalating",
+            priority="high",
+            requires_human=True,
+        )
 
-
-# ============================================================
-# TODO 13: Design 3 HITL decision points
-#
-# For each decision point, define:
-# - trigger: What condition activates this HITL check?
-# - hitl_model: Which model? (human-in-the-loop, human-on-the-loop,
-#   human-as-tiebreaker)
-# - context_needed: What info does the human reviewer need?
-# - example: A concrete scenario
-#
-# Think about real banking scenarios where human judgment is critical.
-# ============================================================
 
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "High-value money transfer approval",
+        "trigger": (
+            "The user requests a money transfer, especially a large transfer, "
+            "international transfer, or transfer to a new beneficiary."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "User identity verification status, transfer amount, recipient details, "
+            "account balance, fraud-risk score, recent transaction history, and the "
+            "agent's proposed response/action."
+        ),
+        "example": (
+            "A customer asks: 'Transfer 50,000 USD to this new overseas account today.' "
+            "Even if the agent is confident, a human reviewer must approve or reject "
+            "the action before execution."
+        ),
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Account closure or personal information change",
+        "trigger": (
+            "The user asks to close an account, change password, update phone number, "
+            "change email, update address, or modify sensitive personal information."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "Authentication result, account ownership evidence, requested change, "
+            "previous contact information, risk flags, and whether the request matches "
+            "normal user behavior."
+        ),
+        "example": (
+            "A customer says: 'Change the phone number on my account and reset my password.' "
+            "Because this can enable account takeover, the request must be escalated to "
+            "a human support officer."
+        ),
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Ambiguous complaint, fraud claim, or policy exception",
+        "trigger": (
+            "The agent has medium or low confidence, or the user reports fraud, disputes "
+            "a transaction, requests a fee waiver, or asks for an exception to bank policy."
+        ),
+        "hitl_model": "human-as-tiebreaker",
+        "context_needed": (
+            "Conversation history, disputed transaction details, relevant bank policy, "
+            "customer tier, prior support tickets, confidence score, and alternative "
+            "responses generated by the agent."
+        ),
+        "example": (
+            "A customer says: 'I did not make this card transaction, but I also lost my phone "
+            "yesterday.' The agent should not make a final judgment alone; a human reviewer "
+            "should decide the next step."
+        ),
     },
 ]
 
